@@ -38,6 +38,8 @@
 #define DAC3101_GPIO1_IO      0x33 // Register 51 - GPIO1 In/Out Pin Control
 
 #define DAC3101_LEFT_BEEP_GEN 0x47 // Register 71 - Left Beep Generator
+#define DAC3101_RIGHT_BEEP_GEN 0x48 // Register 72 - Right Beep Generator
+
 #define DAC3101_BEEP_LEN_MSB  0x49 // Register 73 - Beep Length MSB
 #define DAC3101_BEEP_LEN_MID  0x4A // Register 74 - Beep Length Middle Bits
 #define DAC3101_BEEP_LEN_LSB  0x4B // Register 75 - Beep Length LSB
@@ -78,10 +80,12 @@ on tile[0]: in buffered port:32 p_lrclk = PORT_I2S_LRCLK;
 #define SAMPLE_FREQUENCY 48000
 #define MASTER_CLOCK_FREQUENCY_48 24576000
 #define MASTER_CLOCK_FREQUENCY_44_1 22579200
-#define FFT_LENGTH 1024
+#define FFT_LENGTH 8192
 // generate a 1.5kHz sinewave for 10 seconds
-#define SIN_COEFF 0x18F9
-#define COS_COEFF 0x7D8A
+//#define SIN_COEFF 0x18F9
+#define SIN_COEFF 0xC8C
+//#define COS_COEFF 0x7D8A
+#define COS_COEFF 0x7F62
 #define BEEP_LENGTH 0x75300
 
 #define MIN_SNR_DB 30
@@ -151,17 +155,17 @@ void configure_dac()
             DAC3101_REGWRITE(DAC3101_PLL_J, 0x08);
             // Set PLL D to 0 ...
             // Set PLL D MSB Value to 0x00
-            DAC3101_REGWRITE(DAC3101_PLL_D_MSB, 0x00);
+            DAC3101_REGWRITE(DAC3101_PLL_D_MSB, 0x07);
             // Set PLL D LSB Value to 0x00
-            DAC3101_REGWRITE(DAC3101_PLL_D_LSB, 0x00);
+            DAC3101_REGWRITE(DAC3101_PLL_D_LSB, 0x80);
 
-            delay_milliseconds(1);
+            delay_milliseconds(100);
 
             // Set PLL_CLKIN = BCLK (device pin), CODEC_CLKIN = PLL_CLK (generated on-chip)
-            DAC3101_REGWRITE(DAC3101_CLK_GEN_MUX, 0x07);
+            DAC3101_REGWRITE(DAC3101_CLK_GEN_MUX, 0x03);
 
             // Set PLL P and R values and power up.
-            DAC3101_REGWRITE(DAC3101_PLL_P_R, 0x94);
+            DAC3101_REGWRITE(DAC3101_PLL_P_R, 0xA1);
 
             // Set NDAC clock divider to 4 and power up.
             DAC3101_REGWRITE(DAC3101_NDAC_VAL, 0x84);
@@ -235,7 +239,7 @@ void configure_dac()
         }
     } /* par */
 }
-#define PEAK_BIN 32
+#define PEAK_BIN 131
 void generate_tone() {
     i2c_master_if i_i2c[1];
 
@@ -247,18 +251,26 @@ void generate_tone() {
 
             DAC3101_REGWRITE(DAC3101_BLOCK_SEL, 0x19);
             DAC3101_REGWRITE(DAC3101_BEEP_LEN_MSB, BEEP_LENGTH>>16);
-            DAC3101_REGWRITE(DAC3101_BEEP_LEN_MID, BEEP_LENGTH>>8);
+            DAC3101_REGWRITE(DAC3101_BEEP_LEN_MID, (BEEP_LENGTH>>8)&0xFF);
             DAC3101_REGWRITE(DAC3101_BEEP_LEN_LSB, BEEP_LENGTH&0xFF);
+            printhexln(SIN_COEFF>>8);
+            printhexln(COS_COEFF>>8);
+
             DAC3101_REGWRITE(DAC3101_BEEP_SIN_MSB, SIN_COEFF>>8);
             DAC3101_REGWRITE(DAC3101_BEEP_SIN_LSB, SIN_COEFF&0xFF);
             DAC3101_REGWRITE(DAC3101_BEEP_COS_MSB, COS_COEFF>>8);
             DAC3101_REGWRITE(DAC3101_BEEP_COS_LSB, COS_COEFF&0xFF);
+            //delay_milliseconds(100);
 
             DAC3101_REGWRITE(DAC3101_LEFT_BEEP_GEN, 0x80);
-            delay_milliseconds(100);
+            DAC3101_REGWRITE(DAC3101_RIGHT_BEEP_GEN, 0x80);
 
             while (1) {
-                DAC3101_REGWRITE(DAC3101_LEFT_BEEP_GEN, 0x80);
+             delay_milliseconds(100);
+            //DAC3101_REGWRITE(DAC3101_LEFT_BEEP_GEN, 0x80);
+            //DAC3101_REGWRITE(DAC3101_RIGHT_BEEP_GEN, 0x80);
+
+                    
             }
             // Shutdown
             i_i2c[0].shutdown();
@@ -276,18 +288,28 @@ void create_i2s_slave(client i2s_callback_if i_i2s)
 double compute_snr(dsp_complex_t* sig)
 {
         dsp_fft_bit_reverse(sig, FFT_LENGTH);
-        dsp_fft_forward(sig, FFT_LENGTH, dsp_sine_1024);
+        dsp_fft_forward(sig, FFT_LENGTH, dsp_sine_8192);
         dsp_fft_split_spectrum(sig, FFT_LENGTH);
         double peak = 0;
         double noise = 0;
+        double max_en=0;
+        int max_i=-1;
         for (int i=1; i<FFT_LENGTH; i++) {
             double en = (double)(sig[i].re)*(double)(sig[i].re) + (double)(sig[i].im)*(double)(sig[i].im);
-            if (i==PEAK_BIN) {
-                peak = en;
+        //printf("%d %f\n", i, en);
+
+            if (max_en<en) {
+                max_en = en;
+                max_i = i;
+            }
+            if (i<=PEAK_BIN+2 && i>=PEAK_BIN-2) {
+                peak += en;
             } else {
                 noise += en;
             }
         }
+        printf("%d %f\n", max_i, max_en);
+        
         double snr = 10*log10(peak/noise);
         if (peak==0 || noise==0) {
             debug_printf("Error: No data received\n");
@@ -334,7 +356,6 @@ void i2s_process(server i2s_callback_if i2s)
             debug_printf("FAIL\n", MIN_SNR_DB);
             exit(1);
         } else if (snr_right<MIN_SNR_DB) {
-            exit(2);
             debug_printf("Error: Right channel SNR is %ddB (must be >%ddB)\n", (int) snr_right, MIN_SNR_DB);
             debug_printf("FAIL\n", MIN_SNR_DB);
             exit(2);
