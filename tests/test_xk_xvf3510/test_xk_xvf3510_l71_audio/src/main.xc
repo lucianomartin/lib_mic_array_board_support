@@ -91,7 +91,7 @@ on tile[0]: in buffered port:32 p_lrclk = PORT_I2S_LRCLK;
 // bins before and after the peak where the signal energy is contained 
 #define SIG_BIN 10
 // minimum value of the peak to noise floor ratio
-#define MIN_SNR_DB 46
+#define MIN_SNR_DB 45
 
 on tile[1]: port p_scl = PORT_I2C_SCL;
 on tile[1]: port p_sda = PORT_I2C_SDA;
@@ -320,7 +320,7 @@ int check_metrics(dsp_complex_t* sig)
             ret = 1;
         }
         if (snr_db<MIN_SNR_DB) {
-            debug_printf("Error: SNR is too low: %ddB (must be >%ddB)\n", snr_db, MIN_SNR_DB);            
+            debug_printf("Error: SNR is too low: %ddB (must be >=%ddB)\n", snr_db, MIN_SNR_DB);            
             ret = 1;
         }
         if (peak==0 || noise_floor==0) {
