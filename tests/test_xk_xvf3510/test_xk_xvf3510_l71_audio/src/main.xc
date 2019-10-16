@@ -404,7 +404,7 @@ int main()
             generate_tone();
         }
         on tile[0]: {
-            delay_seconds(7);
+            delay_seconds(5);
             par{
                 create_i2s_slave(i_i2s);
                 i2s_process(i_i2s);
