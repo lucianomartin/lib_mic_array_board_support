@@ -80,15 +80,18 @@ on tile[0]: in buffered port:32 p_lrclk = PORT_I2S_LRCLK;
 #define SAMPLE_FREQUENCY 48000
 #define MASTER_CLOCK_FREQUENCY_48 24576000
 #define MASTER_CLOCK_FREQUENCY_44_1 22579200
-#define FFT_LENGTH 8192
-// generate a 1.5kHz sinewave for 10 seconds
-//#define SIN_COEFF 0x18F9
-#define SIN_COEFF 0xC8C
-//#define COS_COEFF 0x7D8A
-#define COS_COEFF 0x7F62
+#define FFT_LENGTH 1024
+// generate a 1.5kHz sinewave for 10 seconds, given a sample rate of 48kHz
+#define SIN_COEFF 0x18F9
+#define COS_COEFF 0x7D8A
 #define BEEP_LENGTH 0x75300
 
-#define MIN_SNR_DB 30
+// bin where peak is expected
+#define PEAK_BIN 33
+// bins before and after the peak where the signal energy is contained 
+#define SIG_BIN 10
+// minimum value of the peak to noise floor ratio
+#define MIN_SNR_DB 46
 
 on tile[1]: port p_scl = PORT_I2C_SCL;
 on tile[1]: port p_sda = PORT_I2C_SDA;
@@ -239,7 +242,6 @@ void configure_dac()
         }
     } /* par */
 }
-#define PEAK_BIN 131
 void generate_tone() {
     i2c_master_if i_i2c[1];
 
@@ -253,9 +255,6 @@ void generate_tone() {
             DAC3101_REGWRITE(DAC3101_BEEP_LEN_MSB, BEEP_LENGTH>>16);
             DAC3101_REGWRITE(DAC3101_BEEP_LEN_MID, (BEEP_LENGTH>>8)&0xFF);
             DAC3101_REGWRITE(DAC3101_BEEP_LEN_LSB, BEEP_LENGTH&0xFF);
-            printhexln(SIN_COEFF>>8);
-            printhexln(COS_COEFF>>8);
-
             DAC3101_REGWRITE(DAC3101_BEEP_SIN_MSB, SIN_COEFF>>8);
             DAC3101_REGWRITE(DAC3101_BEEP_SIN_LSB, SIN_COEFF&0xFF);
             DAC3101_REGWRITE(DAC3101_BEEP_COS_MSB, COS_COEFF>>8);
@@ -285,38 +284,51 @@ void create_i2s_slave(client i2s_callback_if i_i2s)
     i2s_slave(i_i2s, p_dout, 1, p_din, 1, p_bclk, p_lrclk, bclk);
 }
 
-double compute_snr(dsp_complex_t* sig)
+int check_metrics(dsp_complex_t* sig)
 {
         dsp_fft_bit_reverse(sig, FFT_LENGTH);
-        dsp_fft_forward(sig, FFT_LENGTH, dsp_sine_8192);
+        dsp_fft_forward(sig, FFT_LENGTH, dsp_sine_1024);
         dsp_fft_split_spectrum(sig, FFT_LENGTH);
         double peak = 0;
-        double noise = 0;
+        double noise_floor = 0;
+        double avg_noise_floor = 0;
         double max_en=0;
         int max_i=-1;
-        for (int i=1; i<FFT_LENGTH; i++) {
-            double en = (double)(sig[i].re)*(double)(sig[i].re) + (double)(sig[i].im)*(double)(sig[i].im);
-        //printf("%d %f\n", i, en);
-
-            if (max_en<en) {
-                max_en = en;
+        int ret = 0;
+        for (int i=1; i<FFT_LENGTH/2; i++) {
+            double bin_en = (double)(sig[i].re)*(double)(sig[i].re) + (double)(sig[i].im)*(double)(sig[i].im);
+            // store the index and value of the maximum bin energy
+            if (max_en<bin_en) {
+                max_en = bin_en;
                 max_i = i;
             }
-            if (i<=PEAK_BIN+2 && i>=PEAK_BIN-2) {
-                peak += en;
-            } else {
-                noise += en;
+            // store the value of the peak bin and the noise floor
+            if (i==PEAK_BIN) {
+                peak = bin_en;
+            } else if ( i<PEAK_BIN-SIG_BIN || i>PEAK_BIN+SIG_BIN ){
+                noise_floor += bin_en;  
             }
         }
-        printf("%d %f\n", max_i, max_en);
-        
-        double snr = 10*log10(peak/noise);
-        if (peak==0 || noise==0) {
+        avg_noise_floor = noise_floor/(FFT_LENGTH/2-2*SIG_BIN-1);
+
+        int snr_db = 10*log10(peak/avg_noise_floor);
+
+        debug_printf("SNR is %ddB\n", snr_db);
+
+        if (max_i!=PEAK_BIN) {
+            debug_printf("Error: The peak is in the wrong bin: %d, expected %d\n", max_i, PEAK_BIN);
+            ret = 1;
+        }
+        if (snr_db<MIN_SNR_DB) {
+            debug_printf("Error: SNR is too low: %ddB (must be >%ddB)\n", snr_db, MIN_SNR_DB);            
+            ret = 1;
+        }
+        if (peak==0 || noise_floor==0) {
             debug_printf("Error: No data received\n");
             debug_printf("FAIL\n");
             exit(3);
         }
-        return snr;
+        return ret;
 }
 
 void i2s_process(server i2s_callback_if i2s)
@@ -343,27 +355,28 @@ void i2s_process(server i2s_callback_if i2s)
           right_samples[count] = in_samp;
           count++;
       }
-      double snr_left = 0;
-      double snr_right = 0;
+      int ret = 0;
       if (count==FFT_LENGTH) {
-        snr_left = compute_snr(sig);
+        debug_printf("Testing left channel\n");                
+        ret = check_metrics(sig);
         for (int i=0; i<FFT_LENGTH; i++) {
             sig[i].re = right_samples[i];
         }
-        snr_right = compute_snr(sig);
-        if (snr_left<MIN_SNR_DB) {
-            debug_printf("Error: Left channel SNR is %ddB (must be >%ddB)\n", (int) snr_left, MIN_SNR_DB);
-            debug_printf("FAIL\n", MIN_SNR_DB);
+        if (ret) {
+            debug_printf("Error: Left channel SNR is not correct\n");
+            debug_printf("FAIL\n");
             exit(1);
-        } else if (snr_right<MIN_SNR_DB) {
-            debug_printf("Error: Right channel SNR is %ddB (must be >%ddB)\n", (int) snr_right, MIN_SNR_DB);
-            debug_printf("FAIL\n", MIN_SNR_DB);
+
+        }
+        debug_printf("Testing right channel\n");                
+        ret = check_metrics(sig);
+        if (ret) {
+            debug_printf("Error: Right channel SNR is not correct\n");
+            debug_printf("FAIL\n");
             exit(2);
         } else {
             // success
-            debug_printf("Left channel SNR is %ddB (must be >%ddB)\n", (int) snr_left, MIN_SNR_DB);
-            debug_printf("Right channel SNR is %ddB (must be >%ddB)\n", (int) snr_right, MIN_SNR_DB);
-            debug_printf("PASS\n", MIN_SNR_DB);
+            debug_printf("PASS\n");
             exit(0);
         }
         count = 0;
@@ -391,7 +404,7 @@ int main()
             generate_tone();
         }
         on tile[0]: {
-            delay_seconds(5);
+            delay_seconds(7);
             par{
                 create_i2s_slave(i_i2s);
                 i2s_process(i_i2s);
