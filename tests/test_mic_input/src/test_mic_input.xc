@@ -57,6 +57,8 @@ on tile[0]: in buffered port:32 p_pdm_mics  = PORT_PDM_DATA;
 on tile[0]: in port p_mclk                  = PORT_PDM_MCLK;
 on tile[0]: clock pdmclk                    = XS1_CLKBLK_2;
 
+port p_rst_shared = on tile[0]: XS1_PORT_4F; // Bit 1: DAC_RST_N, Bit 2: SQ_nLIN, BIT 3: INT_N
+
 int data[8][THIRD_STAGE_COEFS_PER_STAGE*DECIMATION_FACTOR];
 
 // Function to write the APP_PLL_CTL register in a clean way to ensure reliable operation.
@@ -335,11 +337,17 @@ void test(streaming chanend c_ds_output[DECIMATOR_COUNT]) {
     }
 }
 
-port p_rst_shared                   = on tile[1]: XS1_PORT_4F; // Bit 0: DAC_RST_N, Bit 1: ETH_RST_N
 int main() {
     chan c_sync;
     par {
-        on tile[0]: { 
+        on tile[0]: {
+
+            // set microphone configuration
+            #if (SQ_MIC_ARRAY == 1)
+            p_rst_shared <: 0x4; // Keep DAC in reset (bit 1 low) and select square mic array (bit 3 high)
+            #else
+            p_rst_shared <: 0x0; // Keep DAC in reset (bit 1 low) and select linear mic array (bit 3 low)
+            #endif
             gen_app_pll_clk();
             c_sync <: (int) 0;
             printf("Send sync token\n");
